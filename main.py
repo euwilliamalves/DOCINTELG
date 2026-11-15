@@ -43,7 +43,7 @@ def banco_vetorial(documento):
     return retriever
 
 def resposta_chat(entrada, banco):
-    llm = ChatOpenAI(model = 'gpt-3.5-turbo', api_key = key)
+    llm = ChatOpenAI(model = 'gpt-4o-mini', api_key = key)
     texto = """
     Responda às perguntas com base no contexto dos documentos.
 
