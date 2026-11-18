@@ -75,7 +75,7 @@ Essa estratégia ajuda a evitar que a recuperação retorne apenas fragmentos mu
 ### 1. Clone o repositório
 
 ```bash
-git clone [URL_DO_REPOSITORIO]
+git clone [URL DO REPOSITORIO]
 cd DocIntelG
 ```
 
