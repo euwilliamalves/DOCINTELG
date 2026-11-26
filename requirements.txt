@@ -1,9 +1,10 @@
-langchain
-langchain-openai
+streamlit
 python-dotenv
+langchain
+langchain-core
 langchain-community
-openai
-tiktoken
+langchain-openai
+langchain-text-splitters
 faiss-cpu
 pypdf
-streamlit
+docx2txt
