@@ -1,82 +1,137 @@
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.vectorstores.faiss import FAISS
-from langchain_core.runnables import RunnableParallel, RunnablePassthrough
 
-from dotenv import load_dotenv
-import streamlit as st
 import os
+from dotenv import load_dotenv
+
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    Docx2txtLoader,
+    TextLoader,
+    CSVLoader
+)
+
+from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+from langchain_core.runnables import (
+    RunnablePassthrough,
+    RunnableWithMessageHistory,
+    RunnableLambda
+)
+
+from langchain_core.output_parsers import StrOutputParser
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+
+
+# =========================
+# CONFIGURAÇÃO
+# =========================
 
 load_dotenv()
 
-key = os.getenv('OPENAI_KEY')
+key = os.getenv("OPENAI_KEY")
 
 if not key:
-    key = st.secrets['OPENAI_KEY']
+    raise ValueError("API indisponível. Verifique sua OPENAI_KEY.")
 
-def leitura_documentos(documento):
-    paginas = []
-    for doc, nome_original in documento:
-        loader = PyPDFLoader(doc)
+# CARREGAMENTO DOS DOCUMENTOS
+def leitura_documentos(arquivos):
+    documentos = []
+    for caminho, nome_original in arquivos:
+        extensao = os.path.splitext(nome_original)[1].lower()
+        if extensao == ".pdf":
+            loader = PyPDFLoader(caminho)
+        elif extensao == ".docx":
+            loader = Docx2txtLoader(caminho)
+        elif extensao == ".txt":
+            loader = TextLoader(caminho, encoding="utf-8")
+        elif extensao == ".csv":
+            loader = CSVLoader(caminho, encoding="utf-8")
+        else:
+            raise ValueError(f"Formato não suportado: {extensao}")
+            
         docs = loader.load()
-
         for doc in docs:
-            doc.metadata['source'] = nome_original
+            doc.metadata["source"] = nome_original
+        documentos.extend(docs)
+    return documentos
 
-        paginas.extend(docs)
-    chunk = RecursiveCharacterTextSplitter(chunk_size = 500, chunk_overlap = 100, separators = ['\n\n', '\n', ',', '.', ''])
-    separado = chunk.split_documents(paginas)
-        
-    return separado
 
-def banco_vetorial(documento):
-    if not documento:
-        raise ValueError('Nenhum documento foi encontrado neste banco.')
-    
-    embed = OpenAIEmbeddings(model = 'text-embedding-3-small', api_key = key)
-    vectorstore = FAISS.from_documents(documents = documento, embedding = embed)
-    retriever = vectorstore.as_retriever(search_kwargs = {'k': 3}, search_type = 'mmr')
+# CHUNKING
+def chunkenizer(documentos):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=100,
+        separators=["\n\n", "\n", ",", ".", ""]
+    )
+    chunks = splitter.split_documents(documentos)
+    for i, doc in enumerate(chunks):
+        doc.metadata["doc_id"] = i
+    return chunks
 
+# BANCO VETORIAL
+def banco_vetorial(documentos):
+    chunks = chunkenizer(documentos)
+    embedding = OpenAIEmbeddings( model = "text-embedding-3-small", api_key = key)
+
+    vector = FAISS.from_documents(documents = chunks, embedding = embedding)
+    retriever = vector.as_retriever(search_type = "mmr", search_kwargs = {"k": 5})
+
+    # Retornamos o retriever e não o banco diretamente.
     return retriever
 
-def resposta_chat(entrada, banco):
-    llm = ChatOpenAI(model = 'gpt-4o-mini', api_key = key)
-    texto = """
-    Responda às perguntas com base no contexto dos documentos.
 
-    O contexto possui o conteúdo dos documentos, além do nome do
-    arquivo e da página onde o conteúdo foi encontrado.
+# CONSTRUÇÃO DO RAG
+def resposta_chat(retriever):
+    store = {}
+    def memory(session_id):
+        if session_id not in store:
+            store[session_id] = InMemoryChatMessageHistory()
+        return store[session_id]
 
-    Se o usuário perguntar em qual documento está uma informação,
-    informe o nome do documento e a página.
+    # Formatação dos documentos recuperados
+    def format_docs(documentos):
+        return "\n\n".join(
+            f"Fonte: {doc.metadata.get('source', 'Desconhecida')}\n"
+            f"Conteúdo: {doc.page_content}"
+            for doc in documentos
+        )
+    prompt =""" Você é um assistente especializado em análise de documentos.
 
-    Se não encontrar a informação no contexto, informe que não
-    encontrou a informação nos documentos.
+            Utilize o contexto recuperado para responder às perguntas.
 
-    Contexto:
-    {contexto}
-    """
+            Regras:
+            - Priorize as informações presentes nos documentos.
+            - Não invente informações.
+            - Se não encontrar a resposta no contexto, informe isso ao usuário.
+            - Considere o histórico para compreender perguntas de acompanhamento.
+
+            Contexto:
+            {context}
+            """
+    # Prompt
     template = ChatPromptTemplate.from_messages([
-        ('system', texto),
-        ('human', '{input}')
+        ("system", prompt),
+        MessagesPlaceholder(variable_name="history"),
+        ("user", "{input}")
     ])
 
-    def formatar_documentos(docs):
-        contexto = ''
+    # Modelo
+    chat = ChatOpenAI( model = "gpt-4o-mini", temperature = 0, api_key = key )
 
-        for doc in docs:
-            fonte = os.path.basename(doc.metadata.get('source', 'Documento desconhecido'))
-            pagina = doc.metadata.get('page', 'Página desconhecida')
+    # Recuperação de contexto
+    context = ( RunnableLambda(lambda x: x["input"]) | retriever | RunnableLambda(format_docs) )
 
-            contexto = contexto + f'Documento: {fonte}\nPágina: {pagina + 1}\nConteúdo: {doc.page_content}'
-        return '\n\n'.join(contexto)
+    # Composição da chain
+    rag_chain = ( RunnablePassthrough.assign( context=context ) | template | chat | StrOutputParser() )
+    # Memória conversacional
+    memory_list = RunnableWithMessageHistory(rag_chain, memory, history_messages_key="history", input_messages_key="input")
 
-    contexto = RunnableParallel(input = RunnablePassthrough(), contexto = banco | formatar_documentos)
-    chain = contexto | template | llm | StrOutputParser()
-    resposta = chain.stream(entrada)
+    return memory_list
 
-    return resposta
-
+# EXECUÇÃO DO CHAT
+def executar_chat(pergunta, rag, session_id):
+    config = {"configurable": { "session_id": session_id }}
+    for chunk in rag.stream( {"input": pergunta}, config = config ):
+        yield chunk
