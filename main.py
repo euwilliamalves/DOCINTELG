@@ -72,7 +72,17 @@ def chunkenizer(documentos):
 
 # BANCO VETORIAL
 def banco_vetorial(documentos):
+    if not documentos:
+        raise ValueError('Nenhum documento foi carregado.')
+    
     chunks = chunkenizer(documentos)
+
+    #Remover chunk sem conteúdo
+    chunks = [ doc for doc in chunks if doc.page_content.strip() ]
+
+    if not chunks:
+        raise ValueError('Nenhum conteúdo válido foi encontrado para gerar embedding.')
+        
     embedding = OpenAIEmbeddings( model = "text-embedding-3-small", api_key = key)
 
     vector = FAISS.from_documents(documents = chunks, embedding = embedding)
